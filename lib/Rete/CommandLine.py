@@ -58,6 +58,177 @@ RDF_SERIALIZATION_FORMATS = [
 ]
 
 
+def gms(goals, noMagic, factGraph, ruleSet, defaultBasePreds,
+        defaultDerivedPreds, network, workingMemory, strictCheck):
+    magicRuleNo = 0
+    magicSeeds = []
+    for goal in goals:
+        goalSeed = AdornLiteral(goal).makeMagicPred()
+        print("Magic seed fact (used in bottom-up evaluation)", goalSeed)
+        magicSeeds.append(goalSeed.toRDFTuple())
+    if noMagic:
+        print("Predicates whose magic sets will not be calculated")
+        for p in noMagic:
+            print("\t", factGraph.qname(p))
+    for rule in MagicSetTransformation(
+            factGraph, ruleSet, goals, derivedPreds=[],
+            strictCheck=strictCheck,
+            defaultPredicates=(defaultBasePreds, defaultDerivedPreds),
+            noMagic=noMagic):
+        magicRuleNo += 1
+        network.buildNetworkFromClause(rule)
+    if len(list(ruleSet)):
+        print("reduction in size of program: %s (%s -> %s clauses)" % (
+              100 - (float(magicRuleNo) / float(len(ruleSet))) * 100,
+              len(list(ruleSet)), magicRuleNo))
+    start = time.time()
+    network.feedFactsToAdd(generateTokenSet(magicSeeds))
+    if not [rule for rule in factGraph.adornedProgram if len(rule.sip)]:
+        warnings.warn("Using GMS sideways information strategy with no " +
+                      "information to pass from query.  Falling back to " +
+                      "naive method over given facts and rules")
+        network.feedFactsToAdd(workingMemory)
+    sTime = time.time() - start
+    if sTime > 1:
+        sTimeStr = "%s seconds" % sTime
+    else:
+        sTime = sTime * 1000
+        sTimeStr = "%s milli seconds" % sTime
+    print("Time to calculate closure on working memory: ", sTimeStr)
+
+
+def bfp(defaultDerivedPreds, options, factGraph, ruleSet, network,
+        hybridPredicates):
+    topDownDPreds = defaultDerivedPreds
+    if options.builtinTemplates:
+        builtinTemplateGraph = Graph().parse(options.builtinTemplates,
+                                             format='n3')
+        builtinDict = dict([
+            (pred, template) for pred, _ignore, template in
+            builtinTemplateGraph.triples(
+                (None, TEMPLATES.filterTemplate, None))])
+    else:
+        builtinDict = None
+    topDownStore = TopDownSPARQLEntailingStore(
+        factGraph.store,
+        factGraph,
+        idb=ruleSet,
+        DEBUG=options.debug,
+        derivedPredicates=topDownDPreds,
+        templateMap=builtinDict,
+        nsBindings=network.nsMap,
+        identifyHybridPredicates=options.hybrid,
+        hybridPredicates=hybridPredicates)
+    targetGraph = Graph(topDownStore)
+    for pref, nsUri in list(network.nsMap.items()):
+        targetGraph.bind(pref, nsUri)
+    start = time.time()
+    sTime = time.time() - start
+    result = targetGraph.query(options.why, initNs=network.nsMap)
+    if result.askAnswer:
+        sTime = time.time() - start
+        if sTime > 1:
+            sTimeStr = "%s seconds" % sTime
+        else:
+            sTime = sTime * 1000
+            sTimeStr = "%s milli seconds" % sTime
+        print("Time to reach answer ground goal answer of %s: %s" % (
+            result.askAnswer[0], sTimeStr))
+    else:
+        for rt in result:
+            sTime = time.time() - start
+            if sTime > 1:
+                sTimeStr = "%s seconds" % sTime
+            else:
+                sTime = sTime * 1000
+                sTimeStr = "%s milli seconds" % sTime
+            if options.firstAnswer:
+                break
+            print("Time to reach answer %s via top-down SPARQL"
+                  " sip strategy: %s" % (rt, sTimeStr))
+    if options.output == 'conflict' and options.method == 'bfp':
+        for _network, _goal in topDownStore.queryNetworks:
+            print(network, _goal)
+            _network.reportConflictSet(options.debug)
+        for query in topDownStore.edbQueries:
+            print(query.asSPARQL())
+
+
+def why(options, factGraph, network, nsBinds, ruleSet, workingMemory):
+    builtinTemplateGraph = Graph()
+    if options.builtinTemplates:
+        builtinTemplateGraph = Graph().parse(options.builtinTemplates,
+                                             format='n3')
+    factGraph.templateMap = dict([
+        (pred, template) for pred, _ignore, template in
+        builtinTemplateGraph.triples((None, TEMPLATES.filterTemplate, None))])
+    goals = []
+    query = ParseSPARQL(options.why)
+    network.nsMap['pml'] = PML
+    network.nsMap['gmp'] = GMP_NS
+    network.nsMap['owl'] = OWL_NS
+    nsBinds.update(network.nsMap)
+    network.nsMap = nsBinds
+    if not query.prologue:
+        query.prologue = Prologue()
+    prefixes = [
+        ns[0] for ns in query.prologue.namespace_manager.namespaces()]
+    for prefix in set(nsBinds.keys()).difference(prefixes):
+        query.prologue.bind(prefix, nsBinds[prefix])
+    print("query.prologue", query.prologue)
+    print("query.query", query[1])
+    print("query.where", query[1].where)
+    print("query.query.whereClause.parsedGraphPattern",
+          query[1].where.parsedGraphPattern)
+    goals.extend([(s, p, o) for s, p, o, c in ReduceGraphPattern(query)])
+    # dPreds=[]# p for s, p, o in goals ]
+    # print("goals", goals)
+    # topDownDerivedPreds  = []
+    defaultBasePreds = []
+    defaultDerivedPreds = set()
+    hybridPredicates = []
+    mapping = dict(factGraph.namespace_manager.namespaces())
+    for edb in options.edb:
+        pref, uri = edb.split(':')
+        defaultBasePreds.append(URIRef(mapping[pref] + uri))
+    noMagic = []
+    for pred in options.noMagic:
+        pref, uri = pred.split(':')
+        noMagic.append(URIRef(mapping[pref] + uri))
+    if options.ddlGraph:
+        ddlGraph = Graph().parse(options.ddlGraph, format='n3')
+        # @TODO: should also get hybrid predicates from DDL graph
+        defaultDerivedPreds = IdentifyDerivedPredicates(
+            ddlGraph, Graph(), ruleSet)
+    else:
+        for idb in options.idb:
+            pref, uri = idb.split(':')
+            defaultDerivedPreds.add(URIRef(mapping[pref] + uri))
+        defaultDerivedPreds.update(
+            set([p == RDF.type and o or p for s, p, o in goals]))
+        for hybrid in options.hybridPredicate:
+            pref, uri = hybrid.split(':')
+            hybridPredicates.append(URIRef(mapping[pref] + uri))
+
+    if options.method == 'gms':
+        gms(goals, noMagic, factGraph, ruleSet, defaultBasePreds,
+            defaultDerivedPreds, network, workingMemory,
+            nameMap[options.strictness])
+        if options.output == 'rif':
+            print("Rules used for bottom-up evaluation")
+            if network.rules:
+                for clause in network.rules:
+                    print(clause)
+            else:
+                for clause in factGraph.adornedProgram:
+                    print(clause)
+    if options.output == 'conflict':
+        network.reportConflictSet()
+    elif options.method == 'bfp':
+        bfp(defaultDerivedPreds, options, factGraph, ruleSet, network,
+            hybridPredicates)
+
+
 def main():
     from optparse import OptionParser
     op = OptionParser('usage: %prog [options] factFile1 factFile2 ... factFileN')
@@ -340,9 +511,9 @@ def main():
                     factGraph.parse(owlImport)
                     print("Parsed Semantic Web Graph.. ", owlImport)
 
-    if not options.sparqlEndpoint and facts:
-        for pref, uri in factGraph.namespaces():
-            nsBinds[pref] = uri
+        if facts:
+            for pref, uri in factGraph.namespaces():
+                nsBinds[pref] = uri
 
     if options.stdin:
         assert not options.sparqlEndpoint, "Cannot use --stdin with --sparqlEndpoint"
@@ -350,12 +521,12 @@ def main():
 
     #Normalize namespace mappings
     #prune redundant, rdflib-allocated namespace prefix mappings
-    newNsMgr = NamespaceManager(factGraph)
+    new_ns_mgr = NamespaceManager(factGraph)
     from FuXi.Rete.Util import CollapseDictionary
     for k, v in list(CollapseDictionary(dict([(k, v)
                                     for k, v in factGraph.namespaces()])).items()):
-        newNsMgr.bind(k, v)
-    factGraph.namespace_manager = newNsMgr
+        new_ns_mgr.bind(k, v)
+    factGraph.namespace_manager = new_ns_mgr
 
     if options.normalForm:
         NormalFormReduction(factGraph)
@@ -444,185 +615,8 @@ def main():
         for rule in ruleSet:
             network.buildNetworkFromClause(rule)
 
-    magicSeeds = []
     if options.why:
-        builtinTemplateGraph = Graph()
-        if options.builtinTemplates:
-            builtinTemplateGraph = Graph().parse(options.builtinTemplates,
-                                                format='n3')
-        factGraph.templateMap = \
-            dict([(pred, template)
-                      for pred, _ignore, template in
-                            builtinTemplateGraph.triples(
-                                (None,
-                                 TEMPLATES.filterTemplate,
-                                 None))])
-        goals = []
-        query = ParseSPARQL(options.why)
-        network.nsMap['pml'] = PML
-        network.nsMap['gmp'] = GMP_NS
-        network.nsMap['owl'] = OWL_NS
-        nsBinds.update(network.nsMap)
-        network.nsMap = nsBinds
-        if not query.prologue:
-            query.prologue = Prologue()
-        prefixes = [
-            ns[0] for ns in query.prologue.namespace_manager.namespaces()]
-        for prefix in set(nsBinds.keys()).difference(prefixes):
-            query.prologue.bind(prefix, nsBinds[prefix])
-        print("query.prologue", query.prologue)
-        print("query.query", query[1])
-        print("query.where", query[1].where)
-        print("query.query.whereClause.parsedGraphPattern",
-                query.query.whereClause.parsedGraphPattern)
-        goals.extend([(s, p, o)
-            for s, p, o, c in ReduceGraphPattern(
-                                query.query.whereClause.parsedGraphPattern,
-                                query.prologue).patterns
-                        ])
-        # dPreds=[]# p for s, p, o in goals ]
-        # print("goals", goals)
-        magicRuleNo = 0
-        bottomUpDerivedPreds = []
-        # topDownDerivedPreds  = []
-        defaultBasePreds = []
-        defaultDerivedPreds = set()
-        hybridPredicates = []
-        mapping = dict(newNsMgr.namespaces())
-        for edb in options.edb:
-            pref, uri = edb.split(':')
-            defaultBasePreds.append(URIRef(mapping[pref] + uri))
-        noMagic = []
-        for pred in options.noMagic:
-            pref, uri = pred.split(':')
-            noMagic.append(URIRef(mapping[pref] + uri))
-        if options.ddlGraph:
-            ddlGraph = Graph().parse(options.ddlGraph, format='n3')
-            # @TODO: should also get hybrid predicates from DDL graph
-            defaultDerivedPreds = IdentifyDerivedPredicates(
-                                    ddlGraph,
-                                    Graph(),
-                                    ruleSet)
-        else:
-            for idb in options.idb:
-                pref, uri = idb.split(':')
-                defaultDerivedPreds.add(URIRef(mapping[pref] + uri))
-            defaultDerivedPreds.update(set([p == RDF.type and o or p for s, p, o in goals]))
-            for hybrid in options.hybridPredicate:
-                pref, uri = hybrid.split(':')
-                hybridPredicates.append(URIRef(mapping[pref] + uri))
-
-        if options.method == 'gms':
-            for goal in goals:
-                goalSeed = AdornLiteral(goal).makeMagicPred()
-                print("Magic seed fact (used in bottom-up evaluation)", goalSeed)
-                magicSeeds.append(goalSeed.toRDFTuple())
-            if noMagic:
-                print("Predicates whose magic sets will not be calculated")
-                for p in noMagic:
-                    print("\t", factGraph.qname(p))
-            for rule in MagicSetTransformation(
-                                       factGraph,
-                                       ruleSet,
-                                       goals,
-                                       derivedPreds=bottomUpDerivedPreds,
-                                       strictCheck=nameMap[options.strictness],
-                                       defaultPredicates=(defaultBasePreds,
-                                                          defaultDerivedPreds),
-                                       noMagic=noMagic):
-                magicRuleNo += 1
-                network.buildNetworkFromClause(rule)
-            if len(list(ruleSet)):
-                print("reduction in size of program: %s (%s -> %s clauses)" % (
-                                           100 - (float(magicRuleNo) / float(len(list(ruleSet)))) * 100,
-                                           len(list(ruleSet)),
-                                           magicRuleNo))
-            start = time.time()
-            network.feedFactsToAdd(generateTokenSet(magicSeeds))
-            if not [rule for rule in factGraph.adornedProgram if len(rule.sip)]:
-                warnings.warn("Using GMS sideways information strategy with no " +
-                              "information to pass from query.  Falling back to " +
-                              "naive method over given facts and rules")
-                network.feedFactsToAdd(workingMemory)
-            sTime = time.time() - start
-            if sTime > 1:
-                sTimeStr = "%s seconds" % sTime
-            else:
-                sTime = sTime * 1000
-                sTimeStr = "%s milli seconds" % sTime
-            print("Time to calculate closure on working memory: ", sTimeStr)
-
-            if options.output == 'rif':
-                print("Rules used for bottom-up evaluation")
-                if network.rules:
-                    for clause in network.rules:
-                        print(clause)
-                else:
-                    for clause in factGraph.adornedProgram:
-                        print(clause)
-            if options.output == 'conflict':
-                network.reportConflictSet()
-
-        elif options.method == 'bfp':
-            topDownDPreds = defaultDerivedPreds
-            if options.builtinTemplates:
-                builtinTemplateGraph = Graph().parse(options.builtinTemplates,
-                                                    format='n3')
-                builtinDict = dict([(pred, template)
-                              for pred, _ignore, template in
-                                    builtinTemplateGraph.triples(
-                                        (None,
-                                         TEMPLATES.filterTemplate,
-                                         None))])
-            else:
-                builtinDict = None
-            topDownStore = TopDownSPARQLEntailingStore(
-                            factGraph.store,
-                            factGraph,
-                            idb=ruleSet,
-                            DEBUG=options.debug,
-                            derivedPredicates=topDownDPreds,
-                            templateMap=builtinDict,
-                            nsBindings=network.nsMap,
-                            identifyHybridPredicates=options.hybrid if options.method == 'bfp' else False,
-                            hybridPredicates=hybridPredicates)
-            targetGraph = Graph(topDownStore)
-            for pref, nsUri in list(network.nsMap.items()):
-                targetGraph.bind(pref, nsUri)
-            start = time.time()
-            # queryLiteral = EDBQuery([BuildUnitermFromTuple(goal) for goal in goals],
-            #                         targetGraph)
-            # query = queryLiteral.asSPARQL()
-            # print("Goal to solve ", query)
-            sTime = time.time() - start
-            result = targetGraph.query(options.why, initNs=network.nsMap)
-            if result.askAnswer:
-                sTime = time.time() - start
-                if sTime > 1:
-                    sTimeStr = "%s seconds" % sTime
-                else:
-                    sTime = sTime * 1000
-                    sTimeStr = "%s milli seconds" % sTime
-                print("Time to reach answer ground goal answer of %s: %s" % (
-                        result.askAnswer[0], sTimeStr))
-            else:
-                for rt in result:
-                    sTime = time.time() - start
-                    if sTime > 1:
-                        sTimeStr = "%s seconds" % sTime
-                    else:
-                        sTime = sTime * 1000
-                        sTimeStr = "%s milli seconds" % sTime
-                    if options.firstAnswer:
-                        break
-                    print("Time to reach answer %s via top-down SPARQL sip strategy: %s" % (rt, sTimeStr))
-            if options.output == 'conflict' and options.method == 'bfp':
-                for _network, _goal in topDownStore.queryNetworks:
-                    print(network, _goal)
-                    _network.reportConflictSet(options.debug)
-                for query in topDownStore.edbQueries:
-                    print(query.asSPARQL())
-
+        why(options, factGraph, network, nsBinds, ruleSet, workingMemory)
     elif options.method == 'naive':
         start = time.time()
         network.feedFactsToAdd(workingMemory)
@@ -641,14 +635,13 @@ def main():
         for rule in HornFromN3(fileN):
             network.buildFilterNetworkFromClause(rule)
 
-    if options.negation and network.negRules and options.method in ['both',
-                                                                    'bottomUp']:
+    if options.negation and network.negRules and options.method in [
+            'both', 'bottomUp']:
         now = time.time()
         rt = network.calculateStratifiedModel(factGraph)
         print(
-        "Time to calculate stratified, stable model (inferred %s facts): %s" % (
-                                    rt,
-                                    time.time() - now))
+            "Time to calculate stratified, stable model"
+            " (inferred %s facts): %s" % (rt, time.time() - now))
     if options.filter:
         print("Applying filter to entailed facts")
         network.inferredFacts = network.filteredFacts
