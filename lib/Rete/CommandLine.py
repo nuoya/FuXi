@@ -516,15 +516,16 @@ def main():
                 nsBinds[pref] = uri
 
     if options.stdin:
-        assert not options.sparqlEndpoint, "Cannot use --stdin with --sparqlEndpoint"
+        assert not options.sparqlEndpoint, (
+            "Cannot use --stdin with --sparqlEndpoint")
         factGraph.parse(sys.stdin, format=options.inputFormat)
 
-    #Normalize namespace mappings
-    #prune redundant, rdflib-allocated namespace prefix mappings
+    # Normalize namespace mappings
+    # prune redundant, rdflib-allocated namespace prefix mappings
     new_ns_mgr = NamespaceManager(factGraph)
     from FuXi.Rete.Util import CollapseDictionary
-    for k, v in list(CollapseDictionary(dict([(k, v)
-                                    for k, v in factGraph.namespaces()])).items()):
+    for k, v in CollapseDictionary(dict([(k, v) for k, v in
+                                   factGraph.namespaces()])).items():
         new_ns_mgr.bind(k, v)
     factGraph.namespace_manager = new_ns_mgr
 
@@ -537,8 +538,7 @@ def main():
         import imp
         userFuncs = imp.load_source('builtins', options.builtins)
         rule_store, rule_graph, network = SetupRuleStore(
-                             makeNetwork=True,
-                             additionalBuiltins=userFuncs.ADDITIONAL_FILTERS)
+            makeNetwork=True, additionalBuiltins=userFuncs.ADDITIONAL_FILTERS)
     else:
         rule_store, rule_graph, network = SetupRuleStore(makeNetwork=True)
     network.inferredFacts = closureDeltaGraph
@@ -559,11 +559,11 @@ def main():
             ontGraph = factGraph
         NormalFormReduction(ontGraph)
         dlp = network.setupDescriptionLogicProgramming(
-                                 ontGraph,
-                                 addPDSemantics=options.pDSemantics,
-                                 constructNetwork=False,
-                                 ignoreNegativeStratus=options.negation,
-                                 safety=safetyNameMap[options.safety])
+            ontGraph,
+            addPDSemantics=options.pDSemantics,
+            constructNetwork=False,
+            ignoreNegativeStratus=options.negation,
+            safety=safetyNameMap[options.safety])
         ruleSet.formulae.extend(dlp)
     if options.output == 'rif' and not options.why:
         for rule in ruleSet:
