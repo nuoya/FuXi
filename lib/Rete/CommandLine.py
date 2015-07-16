@@ -465,15 +465,14 @@ def main():
         nsBinds.update(network.nsMap)
         network.nsMap = nsBinds
         if not query.prologue:
-                query.prologue = Prologue(None, [])
-                query.prologue.prefixBindings.update(nsBinds)
-        else:
-            for prefix, nsInst in list(nsBinds.items()):
-                if prefix not in query.prologue.prefixBindings:
-                    query.prologue.prefixBindings[prefix] = nsInst
+            query.prologue = Prologue()
+        prefixes = [
+            ns[0] for ns in query.prologue.namespace_manager.namespaces()]
+        for prefix in set(nsBinds.keys()).difference(prefixes):
+            query.prologue.bind(prefix, nsBinds[prefix])
         print("query.prologue", query.prologue)
-        print("query.query", query.query)
-        print("query.query.whereClause", query.query.whereClause)
+        print("query.query", query[1])
+        print("query.where", query[1].where)
         print("query.query.whereClause.parsedGraphPattern",
                 query.query.whereClause.parsedGraphPattern)
         goals.extend([(s, p, o)
