@@ -155,10 +155,11 @@ def bfp(defaultDerivedPreds, options, factGraph, ruleSet, network,
 
 
 def why(options, factGraph, network, nsBinds, ruleSet, workingMemory):
-    builtinTemplateGraph = Graph()
     if options.builtinTemplates:
         builtinTemplateGraph = Graph().parse(options.builtinTemplates,
                                              format='n3')
+    else:
+        builtinTemplateGraph = Graph()
     factGraph.templateMap = dict([
         (pred, template) for pred, _ignore, template in
         builtinTemplateGraph.triples((None, TEMPLATES.filterTemplate, None))])
