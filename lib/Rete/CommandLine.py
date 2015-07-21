@@ -27,10 +27,9 @@ from FuXi.Syntax.InfixOWL import Property
 
 from rdflib.graph import Graph
 from rdflib.namespace import NamespaceManager
-from rdflib.plugins.sparql.sparql import Prologue
-from rdflib.plugins.sparql.parser import parseQuery as ParseSPARQL
+from rdflib.plugins.sparql.parser import parseQuery
 
-from rdflib.plugins.sparql.algebra import translate as ReduceGraphPattern
+from rdflib.plugins.sparql.algebra import translateQuery
 
 from rdflib import plugin, RDF, URIRef, Namespace
 from rdflib.store import Store
@@ -163,28 +162,15 @@ def why(options, factGraph, network, nsBinds, ruleSet, workingMemory):
     factGraph.templateMap = dict([
         (pred, template) for pred, _ignore, template in
         builtinTemplateGraph.triples((None, TEMPLATES.filterTemplate, None))])
-    goals = []
-    query = ParseSPARQL(options.why)
     network.nsMap['pml'] = PML
     network.nsMap['gmp'] = GMP_NS
     network.nsMap['owl'] = OWL_NS
     nsBinds.update(network.nsMap)
     network.nsMap = nsBinds
-    if not query.prologue:
-        query.prologue = Prologue()
-    prefixes = [
-        ns[0] for ns in query.prologue.namespace_manager.namespaces()]
-    for prefix in set(nsBinds.keys()).difference(prefixes):
-        query.prologue.bind(prefix, nsBinds[prefix])
-    print("query.prologue", query.prologue)
-    print("query.query", query[1])
-    print("query.where", query[1].where)
-    print("query.query.whereClause.parsedGraphPattern",
-          query[1].where.parsedGraphPattern)
-    goals.extend([(s, p, o) for s, p, o, c in ReduceGraphPattern(query)])
-    # dPreds=[]# p for s, p, o in goals ]
-    # print("goals", goals)
-    # topDownDerivedPreds  = []
+    query = parseQuery(options.why)
+    translateQuery(query, initNs=nsBinds)
+    goals = sum([triple_block['triples'] for triple_block
+                in query[1].where['part']], [])
     defaultBasePreds = []
     defaultDerivedPreds = set()
     hybridPredicates = []
